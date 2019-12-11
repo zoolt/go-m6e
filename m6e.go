@@ -35,6 +35,18 @@ const (
 	setProtocolParam        opcode = 0x9B
 )
 
+type TagProtocol byte
+
+const (
+	TagProtocolNone            TagProtocol = 0x00
+	TagProtocolISO180006B      TagProtocol = 0x03
+	TagProtocolGEN2            TagProtocol = 0x05
+	TagProtocolISO180006BUCODE TagProtocol = 0x06
+	TagProtocolIPX64           TagProtocol = 0x07
+	TagProtocolIPX256          TagProtocol = 0x08
+	TagProtocolATA             TagProtocol = 0x1D
+)
+
 var ErrCmdResponseTimeout = errors.New("Command reponse timeout")
 var ErrCorruptResponse = errors.New("Corrupt response")
 var ErrWrongOpcodeResponse = errors.New("Wrong opcode response")
@@ -90,8 +102,8 @@ func (m *M6E) DisableDebugging() {
 	m.printDebug = false
 }
 
-func (m *M6E) SetBaud(baudRate int) {
-}
+//func (m *M6E) SetBaud(baudRate int) {
+//}
 
 func (m *M6E) GetVersion() error {
 	_, err := m.sendMessage(version, nil, true)
@@ -119,34 +131,88 @@ func (m *M6E) GetReadPower() (float32, error) {
 	return float32(uint16(power[1])<<8|uint16(power[2])) / 100, nil
 }
 
-func (m *M6E) SetWritePower(powerSetting uint) {
+// SetReadPower sets the write-power, enter a value between 1 and 27 (value in dBm)
+func (m *M6E) SetWritePower(powerSetting float32) error {
+	val := uint16(powerSetting * 100)
+	if val > 2700 {
+		val = 2700
+	}
+	_, err := m.sendMessage(setWriteTxPower, []byte{byte(val >> 8), byte(val & 0xff)}, true)
+	return err
 }
 
-func (m *M6E) GetWritePower() {
+func (m *M6E) GetWritePower() (float32, error) {
 	power, err := m.sendMessage(getWriteTxPower, []byte{0x00}, true)
-	log.Println(power)
-	log.Println(err)
+	if err != nil {
+		return 0, err
+	}
+	if len(power) < 3 {
+		return 0, ErrWrongOpcodeResponse
+	}
+	return float32(uint16(power[1])<<8|uint16(power[2])) / 100, nil
 }
 
-func (m *M6E) SetRegion(reg Region) {
+func (m *M6E) SetRegion(reg Region) error {
+	_, err := m.sendMessage(setRegion, []byte{byte(reg)}, true)
+	return err
 }
 
-func (m *M6E) SetAntennaPort() {
+func (m *M6E) SetAntennaPort() error {
+	_, err := m.sendMessage(setAntennaPort, []byte{0x01, 0x01}, true)
+	return err
 }
 
-func (m *M6E) SetAntennaSearchList() {
+//func (m *M6E) SetAntennaSearchList() {
+//}
+
+func (m *M6E) SetTagProtocol(protocol TagProtocol) error {
+	_, err := m.sendMessage(setTagProtocol, []byte{0x0, byte(protocol)}, true)
+	return err
 }
 
-func (m *M6E) SetTagProtocol(protocol byte) {
-	// default 0x05
+func (m *M6E) EnableReadFilter() error {
+	_, err := m.sendMessage(setReaderOptionalParams, []byte{0x0C, 0x01}, true)
+	return err
+}
+
+func (m *M6E) DisableReadFilter() error {
+	_, err := m.sendMessage(setReaderOptionalParams, []byte{0x0C, 0x00}, true)
+	return err
 }
 
 // StartReading disables filtering and start reading continuously
-func (m *M6E) StartReading() {
+func (m *M6E) StartReading() error {
+	err := m.DisableReadFilter()
+	if err != nil {
+		return err
+	}
+
+	//This blob was found by using the 'Transport Logs' option from the Universal Reader Assistant
+	//And connecting the Nano eval kit from Thing Magic to the URA
+	//A lot of it has been deciphered but it's easier and faster just to pass a blob than to
+	//assemble every option and sub-opcode.
+	configBlob := []byte{
+		0x00, 0x00, //Timeout should be zero for true continuous reading
+		0x01,                    // TM Option 1, for continuous reading
+		byte(readTagIDMultiple), // sub command opcode
+		0x00, 0x00,              // search flags
+		byte(TagProtocolGEN2), // protocol ID
+		0x07, 0x22, 0x10, 0x00, 0x1B, 0x03, 0xE8, 0x01, 0xFF,
+	}
+	_, err = m.sendMessage(multiProtocolTagOp, configBlob, true)
+	return err
 }
 
 // StopReading stops continuous read. Give 1000 to 2000ms for the module to stop reading.
-func (m *M6E) StopReading() {
+func (m *M6E) StopReading() error {
+	_, err := m.sendMessage(multiProtocolTagOp, []byte{0x00, 0x00, 0x02}, false)
+	return err
+}
+
+type response struct {
+	Opcode opcode
+	Status int16
+	Data   []byte
 }
 
 func (m *M6E) sendMessage(oc opcode, data []byte, waitForResponse bool) ([]byte, error) {
@@ -162,10 +228,7 @@ func (m *M6E) sendMessage(oc opcode, data []byte, waitForResponse bool) ([]byte,
 		log.Printf("TX: % x", txbuf)
 	}
 
-	//Remove anything in the incoming buffer
-	//TODO this is a bad idea if we are constantly readings tags
-	//  while (_nanoSerial->available())
-	//    _nanoSerial->read();
+	m.port.Flush()
 
 	_, err := m.port.Write(txbuf)
 	if err != nil {
@@ -176,6 +239,56 @@ func (m *M6E) sendMessage(oc opcode, data []byte, waitForResponse bool) ([]byte,
 		return nil, nil
 	}
 
+	res, err := m.readResponse()
+	if err != nil {
+		return nil, err
+	}
+	if res.Opcode != oc {
+		return nil, ErrWrongOpcodeResponse
+	}
+	return res.Data, nil
+}
+
+type ResponseMessage struct {
+	Status int
+	Data   []byte
+}
+
+const (
+	ResponseTemperature = iota
+	ResponseKeepAlive
+	ResponseTempThrottle
+	ResponseTagFound
+	ResponseNoTagFound
+	ResponseUnknown
+)
+
+func (m *M6E) ReadMessage() (*ResponseMessage, error) {
+	res, err := m.readResponse()
+	if err != nil {
+		return nil, err
+	}
+	if res.Opcode != readTagIDMultiple {
+		return nil, ErrWrongOpcodeResponse
+	}
+	ret := &ResponseMessage{Status: ResponseUnknown}
+	if len(res.Data) == 0 {
+		if res.Status == 0x0400 {
+			ret.Status = ResponseKeepAlive
+		} else if res.Status == 0x0504 {
+			ret.Status = ResponseTempThrottle
+		}
+	} else if len(res.Data) == 0x0a {
+		ret.Status = ResponseTemperature
+		ret.Data = res.Data
+	} else if len(res.Data) != 0x08 {
+		ret.Status = ResponseTagFound
+		ret.Data = res.Data
+	}
+	return ret, nil
+}
+
+func (m *M6E) readResponse() (*response, error) {
 	// Layout of response in data array:
 	// [0] [1] [2] [3]      [4]      [5] [6]  ... [LEN+4] [LEN+5] [LEN+6]
 	// FF  LEN OP  STATUSHI STATUSLO xx  xx   ... xx      CRCHI   CRCLO
@@ -206,10 +319,11 @@ func (m *M6E) sendMessage(oc opcode, data []byte, waitForResponse bool) ([]byte,
 	if rxbuf[len(rxbuf)-2] != byte(rxcrc>>8) || rxbuf[len(rxbuf)-1] != byte(rxcrc&0xFF) {
 		return nil, ErrCorruptResponse
 	}
-	if rxbuf[2] != byte(oc) {
-		return nil, ErrWrongOpcodeResponse
-	}
-	return rxbuf[5 : len(rxbuf)-2], nil
+	return &response{
+		Opcode: opcode(rxbuf[2]),
+		Status: int16(rxbuf[3])<<8 | int16(rxbuf[4]),
+		Data:   rxbuf[5 : len(rxbuf)-2],
+	}, nil
 }
 
 //Comes from serial_reader_l3.c
