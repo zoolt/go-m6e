@@ -358,3 +358,67 @@ func (m *M6E) calculateCRC(buf []byte) uint16 {
 
 	return crc
 }
+
+type Tag struct {
+	RFU          []byte
+	RSSI         int
+	FrequencyMhz float32
+	Time         time.Time
+	Phase        int
+	ProtocolID   TagProtocol
+	EmbeddedData []byte
+	TagPC        []byte
+	TagID        []byte
+	TagCRC       []byte
+}
+
+func getDataBytes(data []byte) int {
+	embeddedDataBits := uint16(data[19])<<8 | uint16(data[20])
+	if embeddedDataBits%8 > 0 {
+		return int(embeddedDataBits)/8 + 1
+	}
+	return int(embeddedDataBits) / 8
+}
+
+func ParseTag(lastKeepAlive time.Time, data []byte) (*Tag, error) {
+	if len(data) < 24 {
+		return nil, ErrCorruptResponse
+	}
+	dataBytes := getDataBytes(data)
+	if len(data) < int(24+dataBytes) {
+		return nil, ErrCorruptResponse
+	}
+	rfuLength := int(uint16(data[22+dataBytes])<<8|uint16(data[23+dataBytes])) / 8
+	if len(data) < int(24+dataBytes+rfuLength) {
+		return nil, ErrCorruptResponse
+	}
+
+	t := Tag{
+		RFU:          data[:7],
+		RSSI:         int(data[7]) - 256,
+		FrequencyMhz: float32(uint32(data[9])<<16|uint32(data[10])<<8|uint32(data[11])) / 1000,
+		Time:         lastKeepAlive.Add(time.Millisecond * time.Duration(uint32(data[12])<<24|uint32(data[13])<<16|uint32(data[14])<<8|uint32(data[15]))),
+		Phase:        int(uint16(data[16])<<8 | uint16(data[17])),
+		ProtocolID:   TagProtocol(data[18]),
+		EmbeddedData: data[21 : 21+dataBytes],
+		TagPC:        data[24+dataBytes : 24+dataBytes+2],
+		TagID:        data[24+dataBytes+2 : 24+dataBytes+rfuLength-2],
+		TagCRC:       data[24+dataBytes+rfuLength-2 : 24+dataBytes+rfuLength],
+	}
+	return &t, nil
+	//  [0 to 6] 10 00 1B 01 FF 01 01 = RFU 7 bytes
+	//  [7] C4 = RSSI
+	//  [8] 11 = Antenna ID (4MSB = TX, 4LSB = RX)
+	//  [9, 10, 11] 0E 16 40 = Frequency in kHz
+	//  [12, 13, 14, 15] 00 00 01 27 = Timestamp in ms since last keep alive msg
+	//  [16, 17] 00 00 = phase of signal tag was read at (0 to 180)
+	//  [18] 05 = Protocol ID
+	//  [19, 20] 00 00 = Number of bits of embedded tag data [M bytes]
+	//  [21 to M] (none) = Any embedded data
+	//  [21 + M] 0F = RFU reserved future use
+	//  [22, 23 + M] 00 80 = EPC Length [N bytes]  (bits in EPC including PC and CRC bits). 128 bits = 16 bytes
+	//  [24, 25 + M] 30 00 = Tag EPC Protocol Control (PC) bits
+	//  [26 to 37 + M + N] 00 00 00 00 00 00 00 00 00 00 15 45 = EPC ID
+	//  [38, 39 + M + N] 45 E9 = EPC CRC
+
+}
