@@ -171,12 +171,12 @@ func (m *M6E) SetTagProtocol(protocol TagProtocol) error {
 }
 
 func (m *M6E) EnableReadFilter() error {
-	_, err := m.sendMessage(setReaderOptionalParams, []byte{0x0C, 0x01}, true)
+	_, err := m.sendMessage(setReaderOptionalParams, []byte{0x01, 0x0C, 0x01}, true)
 	return err
 }
 
 func (m *M6E) DisableReadFilter() error {
-	_, err := m.sendMessage(setReaderOptionalParams, []byte{0x0C, 0x00}, true)
+	_, err := m.sendMessage(setReaderOptionalParams, []byte{0x01, 0x0C, 0x00}, true)
 	return err
 }
 
