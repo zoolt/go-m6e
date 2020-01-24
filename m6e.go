@@ -26,13 +26,33 @@ const (
 	getPowerMode            opcode = 0x68
 	getReaderOptionalParams opcode = 0x6a
 	getProtocolParam        opcode = 0x68
+	getUserMode             opcode = 0x69
 	setAntennaPort          opcode = 0x91
 	setTagProtocol          opcode = 0x93
 	setReadTxPower          opcode = 0x92
 	setWriteTxPower         opcode = 0x94
 	setRegion               opcode = 0x97
+	setPowerMode            opcode = 0x98
+	setUserMode             opcode = 0x99
 	setReaderOptionalParams opcode = 0x9a
 	setProtocolParam        opcode = 0x9B
+)
+
+type PowerMode byte
+
+const (
+	PowerModeFull    PowerMode = 0x00
+	PowerModeMinSave PowerMode = 0x01
+	PowerModeMedSave PowerMode = 0x02
+	PowerModeMaxSave PowerMode = 0x03
+)
+
+type UserMode byte
+
+const (
+	UserModeNone    UserMode = 0x00
+	UserModePrinter UserMode = 0x01
+	UserModePortal  UserMode = 0x03
 )
 
 type TagProtocol byte
@@ -75,12 +95,14 @@ const (
 	RegionOpen         Region = 0xFF
 )
 
+// M6E device handle
 type M6E struct {
 	port       *serial.Port
 	head       uint
 	printDebug bool
 }
 
+// New creates a new M6E device-handle
 func New(cfg *serial.Config) (*M6E, error) {
 	cfg.ReadTimeout = 3000 * time.Millisecond
 	port, err := serial.OpenPort(cfg)
@@ -92,6 +114,11 @@ func New(cfg *serial.Config) (*M6E, error) {
 		head:       0,
 		printDebug: false,
 	}, nil
+}
+
+// Close closes the connection
+func (m *M6E) Close() error {
+	return m.port.Close()
 }
 
 func (m *M6E) EnableDebugging() {
@@ -131,13 +158,18 @@ func (m *M6E) GetReadPower() (float32, error) {
 	return float32(uint16(power[1])<<8|uint16(power[2])) / 100, nil
 }
 
-// SetReadPower sets the write-power, enter a value between 1 and 27 (value in dBm)
+// SetWritePower sets the write-power, enter a value between 1 and 27 (value in dBm)
 func (m *M6E) SetWritePower(powerSetting float32) error {
 	val := uint16(powerSetting * 100)
 	if val > 2700 {
 		val = 2700
 	}
 	_, err := m.sendMessage(setWriteTxPower, []byte{byte(val >> 8), byte(val & 0xff)}, true)
+	return err
+}
+
+func (m *M6E) SetBaud(baudRate int) error {
+	_, err := m.sendMessage(setBaudRate, []byte{byte(baudRate >> 8), byte(baudRate & 0xFF)}, false)
 	return err
 }
 
@@ -195,9 +227,13 @@ func (m *M6E) StartReading() error {
 		0x00, 0x00, //Timeout should be zero for true continuous reading
 		0x01,                    // TM Option 1, for continuous reading
 		byte(readTagIDMultiple), // sub command opcode
-		0x00, 0x00,              // search flags
+		0x00, 0x80,              // search flags
 		byte(TagProtocolGEN2), // protocol ID
-		0x07, 0x22, 0x10, 0x00, 0x1B, 0x03, 0xE8, 0x01, 0xFF,
+		0x07, 0x22,
+		0x10, 0x00,
+		0x1B, 0x03,
+		0xE8, 0x01,
+		0xFF,
 	}
 	_, err = m.sendMessage(multiProtocolTagOp, configBlob, true)
 	return err
